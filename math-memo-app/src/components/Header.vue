@@ -25,6 +25,15 @@
     </div>
 
     <div class="header-right">
+      <!-- 타이머 -->
+      <div v-if="timerRunning" class="timer-display">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="timer-icon">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+          <polyline points="12,6 12,12 16,14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="timer-text">{{ formattedTime }}</span>
+      </div>
+
       <!-- 문제 새로고침 버튼 -->
       <button
         class="refresh-btn icon-btn"
@@ -44,6 +53,8 @@
 </template>
 
 <script>
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+
 export default {
   name: 'Header',
   props: {
@@ -58,10 +69,62 @@ export default {
     selectedCategory: {
       type: String,
       default: ''
+    },
+    timerRunning: {
+      type: Boolean,
+      default: false
     }
   },
   emits: ['update:sidebarOpen'],
   setup(props, { emit }) {
+    // 타이머 상태
+    const startTime = ref(null)
+    const elapsedTime = ref(0)
+    let intervalId = null
+
+    // 타이머 시작
+    const startTimer = () => {
+      if (!intervalId) {
+        startTime.value = Date.now() - elapsedTime.value
+        intervalId = setInterval(() => {
+          elapsedTime.value = Date.now() - startTime.value
+        }, 100) // 100ms마다 업데이트
+      }
+    }
+
+    // 타이머 정지
+    const stopTimer = () => {
+      if (intervalId) {
+        clearInterval(intervalId)
+        intervalId = null
+      }
+    }
+
+    // 타이머 리셋
+    const resetTimer = () => {
+      stopTimer()
+      elapsedTime.value = 0
+      startTime.value = null
+    }
+
+    // 시간 포맷팅 (MM:SS)
+    const formattedTime = computed(() => {
+      const totalSeconds = Math.floor(elapsedTime.value / 1000)
+      const minutes = Math.floor(totalSeconds / 60)
+      const seconds = totalSeconds % 60
+      return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+    })
+
+    // 타이머 실행 상태 감시
+    watch(() => props.timerRunning, (running) => {
+      if (running) {
+        resetTimer()
+        startTimer()
+      } else {
+        stopTimer()
+      }
+    }, { immediate: true })
+
     // 사이드바 토글 함수
     const toggleSidebar = () => {
       emit('update:sidebarOpen', !props.sidebarOpen)
@@ -73,9 +136,15 @@ export default {
       console.log('새 문제 요청:', props.selectedGrade, props.selectedCategory)
     }
 
+    // 컴포넌트 언마운트 시 타이머 정리
+    onUnmounted(() => {
+      stopTimer()
+    })
+
     return {
       toggleSidebar,
-      refreshProblem
+      refreshProblem,
+      formattedTime
     }
   }
 }
@@ -164,6 +233,30 @@ export default {
 
 .refresh-btn:hover:not(:disabled) {
   color: var(--primary-color);
+}
+
+.timer-display {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(217, 119, 6, 0.1);
+  border: 1px solid rgba(217, 119, 6, 0.2);
+  border-radius: 20px;
+  color: var(--primary-color);
+  font-weight: 600;
+  font-size: 14px;
+  margin-right: 8px;
+}
+
+.timer-icon {
+  color: var(--primary-color);
+  opacity: 0.8;
+}
+
+.timer-text {
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.5px;
 }
 
 /* 태블릿 가로뷰 중심 반응형 */

@@ -58,15 +58,17 @@
       <div class="toolbar-section">
         <!-- 색상 팔레트 -->
         <div class="color-palette">
-          <button
-            v-for="color in colors"
-            :key="color"
-            class="color-btn"
-            :class="{ active: currentColor === color }"
-            :style="{ backgroundColor: color }"
-            @click="setColor(color)"
-            :aria-label="`색상: ${color}`"
-          ></button>
+          <div class="color-grid">
+            <button
+              v-for="color in colors"
+              :key="color"
+              class="color-btn"
+              :class="{ active: currentColor === color }"
+              :style="{ backgroundColor: color }"
+              @click="setColor(color)"
+              :aria-label="`색상: ${color}`"
+            ></button>
+          </div>
 
           <!-- 커스텀 색상 선택기 -->
           <div class="custom-color">
@@ -108,16 +110,6 @@
           </svg>
         </button>
 
-        <button
-          class="action-btn icon-btn"
-          @click="resetZoom"
-          aria-label="확대/축소 초기화"
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M1 12S5 4 12 4S23 12 23 12 19 20 12 20 1 12 1 12Z" stroke="currentColor" stroke-width="2"/>
-            <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
-          </svg>
-        </button>
       </div>
 
       <div class="toolbar-section">
@@ -162,10 +154,45 @@
           </svg>
         </button>
       </div>
+
+      <div class="toolbar-section">
+        <!-- 데이터 수집 상태 -->
+        <div class="data-collection-info">
+          <div class="data-stats">
+            <span class="stat-item">
+              <span class="stat-label">스트로크:</span>
+              <span class="stat-value">{{ sessionData.strokes.length }}</span>
+            </span>
+            <span class="stat-item">
+              <span class="stat-label">이벤트:</span>
+              <span class="stat-value">{{ sessionData.events.length }}</span>
+            </span>
+          </div>
+          <div class="capabilities">
+            <span class="capability" :class="{ active: sessionData.capabilities.pressure }">압력</span>
+            <span class="capability" :class="{ active: sessionData.capabilities.tilt }">기울기</span>
+            <span class="capability" :class="{ active: sessionData.capabilities.twist }">비틀기</span>
+          </div>
+        </div>
+
+        <!-- JSON 다운로드 버튼 -->
+        <button
+          class="action-btn download-btn"
+          @click="downloadSessionData"
+          aria-label="JSON 데이터 다운로드"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <polyline points="7,10 12,15 17,10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <span class="download-text">JSON 다운로드</span>
+        </button>
+      </div>
     </div>
 
     <!-- 캔버스 영역 -->
-    <div class="canvas-container" ref="canvasContainer">
+    <div class="canvas-container" ref="canvasContainer" :class="{ 'eraser-cursor': currentTool === 'eraser' }" :style="eraserCursorStyle">
       <!-- 가이드 라인 -->
       <div class="guide-lines">
         <!-- 수평선들 -->
@@ -200,13 +227,11 @@
         class="memo-canvas"
         :data-tool="currentTool"
         @mousedown="startDrawing"
-        @mousemove="draw"
+        @mousemove="handleMouseMove"
         @mouseup="stopDrawing"
-        @mouseleave="stopDrawing"
-        @touchstart.prevent="handleTouchStart"
-        @touchmove.prevent="handleTouchMove"
-        @touchend.prevent="handleTouchEnd"
-        @touchcancel.prevent="handleTouchEnd"
+        @touchstart="startDrawing"
+        @touchmove="draw"
+        @touchend="stopDrawing"
       ></canvas>
 
       <!-- 캔버스 안내 텍스트 -->
@@ -222,7 +247,7 @@
 </template>
 
 <script>
-import { ref, onMounted, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, watch, computed } from 'vue'
 
 export default {
   name: 'MemoCanvas',
@@ -258,16 +283,45 @@ export default {
     const customColor = ref('#000000')
     const strokeWidth = ref(3)
 
-    // 색상 팔레트
+    // UUID 생성 함수 (브라우저 호환성)
+    const generateUUID = () => {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        return crypto.randomUUID()
+      }
+      // 폴리필: 간단한 UUID v4 생성
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0
+        const v = c == 'x' ? r : (r & 0x3 | 0x8)
+        return v.toString(16)
+      })
+    }
+
+    // 간단한 데이터 수집
+    const sessionData = ref({
+      sessionId: generateUUID(),
+      startTime: Date.now(),
+      strokes: [],
+      events: [],
+      capabilities: {
+        pressure: false,
+        tilt: false,
+        twist: false
+      },
+      stats: {
+        undoCount: 0,
+        redoCount: 0
+      }
+    })
+
+    // 색상 팔레트 (압축된 필수 색상만)
     const colors = ref([
-      '#000000', '#ffffff', '#ff0000', '#00ff00',
-      '#0000ff', '#ffff00', '#ff00ff', '#00ffff',
-      '#ff8000', '#8000ff', '#008080', '#800080'
+      '#000000', '#ff0000', '#0000ff', '#00ff00',
+      '#ffff00', '#ff8000', '#800080', '#ffffff'
     ])
 
     // 히스토리 관리
     const history = ref([])
-    const historyStep = ref(0)
+    const historyStep = ref(-1)
 
     // 가이드 라인 계산
     const horizontalLines = ref([])
@@ -280,6 +334,16 @@ export default {
     // 이전 좌표
     let lastX = 0
     let lastY = 0
+
+    // 지우개 커서 스타일
+    const eraserCursorStyle = computed(() => {
+      if (currentTool.value !== 'eraser') return {}
+
+      const size = strokeWidth.value * 2 // 실제 지우개 크기에 맞게 조정
+      return {
+        '--eraser-size': `${size}px`
+      }
+    })
 
     // 가이드 라인 계산
     const calculateGuideLines = () => {
@@ -340,7 +404,7 @@ export default {
       saveToHistory()
     }
 
-    // 오버레이 이미지 그리기
+    // 오버레이 이미지 그리기 (변환 없이 기본 좌표계에서)
     const drawOverlayImage = () => {
       if (!ctx || !overlayImage.value) return
 
@@ -364,55 +428,128 @@ export default {
         overlayImageSize.value = { width: drawWidth, height: drawHeight }
       }
 
+      // 변환 적용 없이 기본 좌표계에서 그리기
       ctx.drawImage(
         overlayImage.value,
-        overlayImagePosition.value.x,
-        overlayImagePosition.value.y,
-        overlayImageSize.value.width,
-        overlayImageSize.value.height
+        overlayImagePosition.value.x * zoom.value + panX.value,
+        overlayImagePosition.value.y * zoom.value + panY.value,
+        overlayImageSize.value.width * zoom.value,
+        overlayImageSize.value.height * zoom.value
       )
     }
 
-    // 좌표 계산 (마우스/터치)
+    // 좌표 계산 (마우스/터치 이벤트)
     const getCoordinates = (event) => {
       const canvasEl = canvas.value
       const rect = canvasEl.getBoundingClientRect()
 
-      let clientX, clientY
-
-      if (event.touches) {
+      let x, y
+      if (event.touches && event.touches.length > 0) {
         // 터치 이벤트
-        clientX = event.touches[0].clientX
-        clientY = event.touches[0].clientY
+        x = event.touches[0].clientX - rect.left
+        y = event.touches[0].clientY - rect.top
       } else {
         // 마우스 이벤트
-        clientX = event.clientX
-        clientY = event.clientY
+        x = event.clientX - rect.left
+        y = event.clientY - rect.top
+      }
+
+      return { x, y }
+    }
+
+    // 이벤트에서 기본 데이터 추출
+    const extractEventData = (event) => {
+      const coords = getCoordinates(event)
+      const timestamp = Date.now() - sessionData.value.startTime
+
+      // 포인터 이벤트에서 압력, 기울기, 비틀기 정보 추출
+      let pressure = 0.5
+      let tiltX = 0
+      let tiltY = 0
+      let twist = 0
+
+      if (event.pressure !== undefined) {
+        pressure = event.pressure
+        sessionData.value.capabilities.pressure = true
+      }
+      if (event.tiltX !== undefined) {
+        tiltX = event.tiltX
+        sessionData.value.capabilities.tilt = true
+      }
+      if (event.tiltY !== undefined) {
+        tiltY = event.tiltY
+        sessionData.value.capabilities.tilt = true
+      }
+      if (event.twist !== undefined) {
+        twist = event.twist
+        sessionData.value.capabilities.twist = true
       }
 
       return {
-        x: clientX - rect.left,
-        y: clientY - rect.top
+        timestamp,
+        x: coords.x,
+        y: coords.y,
+        pressure,
+        tiltX,
+        tiltY,
+        twist,
+        eventType: event.type,
+        tool: currentTool.value,
+        color: currentColor.value,
+        strokeWidth: strokeWidth.value
       }
     }
 
-    // 이미지 영역 체크
+    // 현재 스트로크 데이터
+    let currentStroke = null
+
+
+    // 이미지 영역 체크 (화면 좌표에서 직접 체크)
     const isPointInImage = (x, y) => {
       if (!overlayImage.value) return false
 
+      // 화면에 표시된 이미지의 실제 위치와 크기
+      const imageScreenX = overlayImagePosition.value.x * zoom.value + panX.value
+      const imageScreenY = overlayImagePosition.value.y * zoom.value + panY.value
+      const imageScreenWidth = overlayImageSize.value.width * zoom.value
+      const imageScreenHeight = overlayImageSize.value.height * zoom.value
+
       return (
-        x >= overlayImagePosition.value.x &&
-        x <= overlayImagePosition.value.x + overlayImageSize.value.width &&
-        y >= overlayImagePosition.value.y &&
-        y <= overlayImagePosition.value.y + overlayImageSize.value.height
+        x >= imageScreenX &&
+        x <= imageScreenX + imageScreenWidth &&
+        y >= imageScreenY &&
+        y <= imageScreenY + imageScreenHeight
       )
+    }
+
+    // 지우개 커서 마우스 추적
+    const updateEraserCursor = (event) => {
+      if (currentTool.value === 'eraser' && canvasContainer.value) {
+        const rect = canvasContainer.value.getBoundingClientRect()
+        const x = event.clientX - rect.left
+        const y = event.clientY - rect.top
+
+        canvasContainer.value.style.setProperty('--cursor-x', x + 'px')
+        canvasContainer.value.style.setProperty('--cursor-y', y + 'px')
+      }
+    }
+
+    // 마우스 이동 통합 핸들러
+    const handleMouseMove = (event) => {
+      draw(event)
+      updateEraserCursor(event)
     }
 
     // 그리기 시작
     const startDrawing = (event) => {
       if (!ctx) return
 
+      event.preventDefault()
       const coords = getCoordinates(event)
+
+      // 이벤트 데이터 수집
+      const eventData = extractEventData(event)
+      sessionData.value.events.push(eventData)
 
       if (currentTool.value === 'hand') {
         // 손도구 모드
@@ -441,11 +578,24 @@ export default {
 
         ctx.beginPath()
         ctx.moveTo(lastX, lastY)
+
+        // 새 스트로크 시작
+        currentStroke = {
+          id: generateUUID(),
+          startTime: eventData.timestamp,
+          tool: currentTool.value,
+          color: currentColor.value,
+          strokeWidth: strokeWidth.value,
+          points: [eventData]
+        }
       }
     }
 
     // 그리기
     const draw = (event) => {
+      if (!isDrawing.value && !isDragging.value) return
+
+      event.preventDefault()
       const coords = getCoordinates(event)
 
       if (currentTool.value === 'hand' && isDragging.value) {
@@ -456,96 +606,118 @@ export default {
         if (dragTarget.value === 'image' && overlayImage.value) {
           // 이미지 이동
           overlayImagePosition.value = {
-            x: overlayImagePosition.value.x + deltaX,
-            y: overlayImagePosition.value.y + deltaY
+            x: overlayImagePosition.value.x + deltaX / zoom.value,
+            y: overlayImagePosition.value.y + deltaY / zoom.value
           }
-
-          // 캔버스 다시 그리기
           redrawCanvas()
-
           dragStart.value = coords
         } else if (dragTarget.value === 'canvas') {
           // 캔버스 패닝
           panX.value += deltaX
           panY.value += deltaY
-
-          // 캔버스 다시 그리기
           redrawCanvas()
-
           dragStart.value = coords
         }
       } else if (isDrawing.value && ctx) {
-        // 일반 그리기
+        // 그리기 중 이벤트 데이터 수집
+        const eventData = extractEventData(event)
+        sessionData.value.events.push(eventData)
+
+        // 현재 스트로크에 포인트 추가
+        if (currentStroke) {
+          currentStroke.points.push(eventData)
+        }
+
+        // 그리기
         ctx.lineTo(coords.x, coords.y)
         ctx.stroke()
-
         lastX = coords.x
         lastY = coords.y
       }
     }
 
     // 그리기 종료
-    const stopDrawing = () => {
+    const stopDrawing = (event) => {
       if (isDrawing.value) {
+        // 마지막 이벤트 데이터 수집
+        const eventData = extractEventData(event)
+        sessionData.value.events.push(eventData)
+
+        // 현재 스트로크 완료
+        if (currentStroke) {
+          currentStroke.endTime = eventData.timestamp
+          currentStroke.points.push(eventData)
+          sessionData.value.strokes.push(currentStroke)
+          currentStroke = null
+        }
+
         isDrawing.value = false
         saveToHistory()
       }
 
-      // 드래그 상태 종료
       isDragging.value = false
       isImageDragging.value = false
       dragTarget.value = null
     }
 
-    // 캔버스 다시 그리기
-    const redrawCanvas = () => {
-      if (!ctx || !canvas.value) return
 
-      // 캔버스 클리어
-      ctx.save()
-      ctx.setTransform(1, 0, 0, 1, 0, 0)
-      ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
-      ctx.restore()
+    // JSON 데이터 생성
+    const generateSessionData = () => {
+      const now = new Date()
+      const sessionDuration = Date.now() - sessionData.value.startTime
 
-      // 변환 적용
-      ctx.save()
-      ctx.scale(zoom.value, zoom.value)
-      ctx.translate(panX.value, panY.value)
-
-      // 기존 드로잉 복원 (히스토리에서)
-      if (history.value.length > 0) {
-        const img = new Image()
-        img.onload = () => {
-          ctx.drawImage(img, 0, 0)
-
-          // 오버레이 이미지 그리기
-          if (overlayImage.value) {
-            drawOverlayImage()
-          }
-
-          ctx.restore()
+      return {
+        metadata: {
+          version: "1.0",
+          generator: "Math Memo App",
+          sessionId: sessionData.value.sessionId,
+          startTime: new Date(sessionData.value.startTime).toISOString(),
+          endTime: now.toISOString(),
+          duration: sessionDuration,
+          totalStrokes: sessionData.value.strokes.length,
+          totalEvents: sessionData.value.events.length
+        },
+        deviceCapabilities: sessionData.value.capabilities,
+        canvasData: {
+          strokes: sessionData.value.strokes,
+          events: sessionData.value.events
+        },
+        statistics: {
+          ...sessionData.value.stats,
+          averageStrokeLength: sessionData.value.strokes.length > 0
+            ? sessionData.value.strokes.reduce((sum, stroke) => sum + stroke.points.length, 0) / sessionData.value.strokes.length
+            : 0,
+          sessionDuration
         }
-        img.src = history.value[historyStep.value] || history.value[history.value.length - 1]
-      } else {
-        // 오버레이 이미지만 그리기
-        if (overlayImage.value) {
-          drawOverlayImage()
-        }
-        ctx.restore()
       }
     }
 
-    // 터치 이벤트 핸들러
-    const handleTouchStart = (event) => {
-      startDrawing(event)
-    }
+    // JSON 다운로드
+    const downloadSessionData = () => {
+      const data = generateSessionData()
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
 
-    const handleTouchMove = (event) => {
-      draw(event)
-    }
+      // 더 명확한 파일명 생성
+      const now = new Date()
+      const dateStr = now.toISOString().split('T')[0] // YYYY-MM-DD
+      const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-') // HH-MM-SS
+      const shortId = sessionData.value.sessionId.split('-')[0] // 짧은 ID
 
-    const handleTouchEnd = (event) => {
-      stopDrawing()
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `math-memo-${dateStr}_${timeStr}_${shortId}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      console.log('JSON 데이터 다운로드 완료:', {
+        fileName: `math-memo-${dateStr}_${timeStr}_${shortId}.json`,
+        strokes: sessionData.value.strokes.length,
+        events: sessionData.value.events.length,
+        capabilities: sessionData.value.capabilities
+      })
     }
 
     // 도구 설정
@@ -561,45 +733,51 @@ export default {
     }
 
     const updateStrokeWidth = () => {
-      // 실시간 선 굵기 업데이트는 다음 그리기부터 적용됨
+      // 스트로크 폭 변경
     }
 
-    // 히스토리 관리
+    // 히스토리 저장
     const saveToHistory = () => {
-      if (!canvas.value) return
-
-      const imageData = canvas.value.toDataURL()
+      if (!ctx || !canvas.value) return
 
       // 현재 단계 이후의 히스토리 제거
       history.value = history.value.slice(0, historyStep.value + 1)
 
-      // 새 상태 추가
+      // 현재 캔버스 상태를 이미지로 저장
+      const imageData = canvas.value.toDataURL()
       history.value.push(imageData)
       historyStep.value = history.value.length - 1
 
-      // 히스토리 크기 제한 (메모리 관리)
-      if (history.value.length > 20) {
+      // 히스토리 크기 제한
+      if (history.value.length > 50) {
         history.value.shift()
         historyStep.value--
       }
     }
 
-    const restoreFromHistory = (step) => {
-      if (!ctx || !history.value[step]) return
+    const redrawCanvas = () => {
+      if (!ctx || !canvas.value) return
 
-      const img = new Image()
-      img.onload = () => {
-        ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
-        ctx.drawImage(img, 0, 0)
+      // 캔버스 클리어
+      ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
 
-        // 오버레이 이미지가 있으면 다시 그리기
+      // 현재 히스토리 단계의 이미지 복원
+      if (historyStep.value >= 0 && history.value[historyStep.value]) {
+        const img = new Image()
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0)
+          // 오버레이 이미지 다시 그리기
+          if (overlayImage.value) {
+            drawOverlayImage()
+          }
+        }
+        img.src = history.value[historyStep.value]
+      } else {
+        // 오버레이 이미지만 그리기
         if (overlayImage.value) {
           drawOverlayImage()
         }
       }
-      img.src = history.value[step]
-
-      historyStep.value = step
     }
 
     // 실행 취소/다시 실행
@@ -608,13 +786,17 @@ export default {
 
     const undo = () => {
       if (historyStep.value > 0) {
-        restoreFromHistory(historyStep.value - 1)
+        historyStep.value--
+        redrawCanvas()
+        sessionData.value.stats.undoCount++
       }
     }
 
     const redo = () => {
       if (historyStep.value < history.value.length - 1) {
-        restoreFromHistory(historyStep.value + 1)
+        historyStep.value++
+        redrawCanvas()
+        sessionData.value.stats.redoCount++
       }
     }
 
@@ -622,6 +804,7 @@ export default {
     const clearAll = () => {
       if (!ctx || !canvas.value) return
 
+      // 캔버스 클리어
       ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
 
       // 오버레이 이미지가 있으면 다시 그리기
@@ -664,12 +847,10 @@ export default {
         overlayImagePosition.value = { x: 20, y: 20 }
         overlayImageSize.value = { width: 0, height: 0 }
 
-        // 캔버스 클리어하고 오버레이 이미지 그리기
+        // 오버레이 이미지만 그리기 (히스토리 저장 안 함)
         if (ctx && canvas.value) {
-          ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
           drawOverlayImage()
           hasDrawn.value = true
-          saveToHistory()
         }
       }
       img.onerror = (error) => {
@@ -677,6 +858,7 @@ export default {
       }
       img.src = imageData.src
     }
+
 
     // 히스토리 상태 업데이트
     watch([historyStep, history], () => {
@@ -688,39 +870,44 @@ export default {
     const handleResize = () => {
       if (!canvas.value || !canvasContainer.value) return
 
-      // 현재 캔버스 내용 저장
-      const imageData = canvas.value.toDataURL()
+      // 오버레이 이미지 정보 저장
+      const savedOverlayImage = overlayImage.value
+      const savedOverlayImageData = overlayImageData.value
+      const savedOverlayPosition = { ...overlayImagePosition.value }
+      const savedOverlaySize = { ...overlayImageSize.value }
 
-      // 캔버스 크기 재조정 (initCanvas에서 이미 오버레이 이미지를 그리므로 중복 방지)
+      // 현재 히스토리 저장
+      const currentHistoryData = history.value[historyStep.value]
+
       nextTick(() => {
-        const savedOverlayImage = overlayImage.value
-        const savedOverlayImageData = overlayImageData.value
-
-        // 임시로 오버레이 이미지 제거
-        overlayImage.value = null
-        overlayImageData.value = null
-
+        // 캔버스 크기 재조정
         initCanvas()
 
-        // 내용 복원
-        if (hasDrawn.value) {
+        // 드로잉 히스토리 복원
+        if (currentHistoryData && hasDrawn.value) {
           const img = new Image()
           img.onload = () => {
             ctx.drawImage(img, 0, 0)
 
             // 오버레이 이미지 복원
-            overlayImage.value = savedOverlayImage
-            overlayImageData.value = savedOverlayImageData
+            if (savedOverlayImage) {
+              overlayImage.value = savedOverlayImage
+              overlayImageData.value = savedOverlayImageData
+              overlayImagePosition.value = savedOverlayPosition
+              overlayImageSize.value = savedOverlaySize
 
-            if (overlayImage.value) {
               drawOverlayImage()
             }
           }
-          img.src = imageData
-        } else {
-          // 오버레이 이미지만 복원
+          img.src = currentHistoryData
+        } else if (savedOverlayImage) {
+          // 드로잉이 없고 오버레이 이미지만 있는 경우
           overlayImage.value = savedOverlayImage
           overlayImageData.value = savedOverlayImageData
+          overlayImagePosition.value = savedOverlayPosition
+          overlayImageSize.value = savedOverlaySize
+
+          drawOverlayImage()
         }
       })
     }
@@ -731,6 +918,11 @@ export default {
         initCanvas()
         window.addEventListener('resize', handleResize)
       })
+    })
+
+    // 컴포넌트 언마운트 시 정리
+    onUnmounted(() => {
+      window.removeEventListener('resize', handleResize)
     })
 
     return {
@@ -750,9 +942,7 @@ export default {
       startDrawing,
       draw,
       stopDrawing,
-      handleTouchStart,
-      handleTouchMove,
-      handleTouchEnd,
+      handleMouseMove,
       setTool,
       setColor,
       updateStrokeWidth,
@@ -764,7 +954,12 @@ export default {
       zoomOut,
       resetZoom,
       zoom,
-      redrawCanvas
+      redrawCanvas,
+      sessionData,
+      downloadSessionData,
+      generateSessionData,
+      eraserCursorStyle,
+      updateEraserCursor
     }
   }
 }
@@ -852,14 +1047,21 @@ export default {
 .color-palette {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 6px;
+}
+
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 20px);
+  grid-template-rows: repeat(2, 20px);
+  gap: 2px;
 }
 
 .color-btn {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   border: 2px solid transparent;
-  border-radius: 4px;
+  border-radius: 3px;
   cursor: pointer;
   transition: all 0.15s ease;
   position: relative;
@@ -867,12 +1069,12 @@ export default {
 
 .color-btn.active {
   border-color: var(--primary-color);
-  transform: scale(1.15);
+  transform: scale(1.1);
   box-shadow: 0 2px 4px rgba(217, 119, 6, 0.3);
 }
 
 .color-btn:hover {
-  transform: scale(1.08);
+  transform: scale(1.05);
 }
 
 .custom-color {
@@ -880,10 +1082,10 @@ export default {
 }
 
 .color-picker {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   border: none;
-  border-radius: 4px;
+  border-radius: 3px;
   cursor: pointer;
   background: transparent;
 }
@@ -905,6 +1107,82 @@ export default {
   color: #dc2626;
 }
 
+.data-collection-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(217, 119, 6, 0.05);
+  border: 1px solid rgba(217, 119, 6, 0.2);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.data-stats {
+  display: flex;
+  gap: 8px;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.stat-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.stat-value {
+  color: var(--primary-color);
+  font-weight: 600;
+  font-family: 'Courier New', monospace;
+}
+
+.capabilities {
+  display: flex;
+  gap: 4px;
+}
+
+.capability {
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(107, 114, 128, 0.1);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.capability.active {
+  background: var(--primary-color);
+  color: white;
+}
+
+.download-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--primary-color);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.download-btn:hover {
+  background: #ea580c;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(217, 119, 6, 0.3);
+}
+
+.download-text {
+  font-size: 12px;
+}
+
 .canvas-container {
   flex: 1;
   position: relative;
@@ -914,6 +1192,32 @@ export default {
   box-shadow: var(--shadow-sm);
   border: 1px solid var(--border-color);
   overflow: hidden;
+}
+
+/* 지우개 커서 */
+.canvas-container.eraser-cursor {
+  cursor: none;
+}
+
+.canvas-container.eraser-cursor::before {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  z-index: 1000;
+  border-radius: 50%;
+  border: 2px solid #dc2626;
+  background: rgba(220, 38, 38, 0.1);
+  width: var(--eraser-size, 20px);
+  height: var(--eraser-size, 20px);
+  left: var(--cursor-x, -100px);
+  top: var(--cursor-y, -100px);
+  transform: translate(-50%, -50%);
+  transition: width 0.2s ease, height 0.2s ease;
+  opacity: 0;
+}
+
+.canvas-container.eraser-cursor:hover::before {
+  opacity: 1;
 }
 
 .guide-lines {
@@ -1059,9 +1363,20 @@ export default {
     height: 32px;
   }
 
+  .color-grid {
+    grid-template-columns: repeat(4, 18px);
+    grid-template-rows: repeat(2, 18px);
+    gap: 2px;
+  }
+
   .color-btn {
-    width: 24px;
-    height: 24px;
+    width: 18px;
+    height: 18px;
+  }
+
+  .color-picker {
+    width: 18px;
+    height: 18px;
   }
 
   .stroke-slider {
@@ -1103,9 +1418,20 @@ export default {
     height: 32px;
   }
 
+  .color-grid {
+    grid-template-columns: repeat(4, 17px);
+    grid-template-rows: repeat(2, 17px);
+    gap: 2px;
+  }
+
   .color-btn {
-    width: 22px;
-    height: 22px;
+    width: 17px;
+    height: 17px;
+  }
+
+  .color-picker {
+    width: 17px;
+    height: 17px;
   }
 
   .stroke-slider {
@@ -1159,9 +1485,20 @@ export default {
     height: 28px;
   }
 
+  .color-grid {
+    grid-template-columns: repeat(4, 16px);
+    grid-template-rows: repeat(2, 16px);
+    gap: 1px;
+  }
+
   .color-btn {
-    width: 20px;
-    height: 20px;
+    width: 16px;
+    height: 16px;
+  }
+
+  .color-picker {
+    width: 16px;
+    height: 16px;
   }
 
   .stroke-width-control {
@@ -1173,7 +1510,19 @@ export default {
   }
 
   .color-palette {
-    gap: 2px;
+    gap: 4px;
+  }
+
+  .data-collection-info {
+    display: none;
+  }
+
+  .download-btn {
+    padding: 6px 8px;
+  }
+
+  .download-text {
+    display: none;
   }
 
   .canvas-container {

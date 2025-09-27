@@ -13,6 +13,7 @@
         v-model:sidebarOpen="sidebarOpen"
         :selectedGrade="selectedGrade"
         :selectedCategory="selectedCategory"
+        :timerRunning="timerRunning"
       />
 
       <!-- 가로뷰 콘텐츠 영역 -->
@@ -70,12 +71,18 @@ export default {
     // 메모 캔버스 참조
     const memoCanvas = ref(null)
 
+    // 타이머 상태
+    const timerRunning = ref(false)
+
     // 문제 선택 핸들러
     const handleProblemSelect = (problemData) => {
       selectedGrade.value = problemData.grade
       selectedCategory.value = problemData.category
       currentProblem.value = problemData.problem
       sidebarOpen.value = false // 문제 선택 후 사이드바 닫기
+
+      // 타이머 시작
+      timerRunning.value = true
     }
 
     // 이미지를 메모 캔버스에 추가하는 핸들러
@@ -91,6 +98,7 @@ export default {
       selectedCategory,
       currentProblem,
       memoCanvas,
+      timerRunning,
       handleProblemSelect,
       handleAddImageToCanvas
     }
