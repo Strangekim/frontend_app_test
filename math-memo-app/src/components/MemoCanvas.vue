@@ -226,12 +226,16 @@
         ref="canvas"
         class="memo-canvas"
         :data-tool="currentTool"
+        @pointerdown="handlePointerDown"
+        @pointermove="handlePointerMove"
+        @pointerup="handlePointerUp"
+        @pointercancel="handlePointerUp"
+        @touchstart="handleTouchStart"
+        @touchmove="handleTouchMove"
+        @touchend="handleTouchEnd"
         @mousedown="startDrawing"
         @mousemove="handleMouseMove"
         @mouseup="stopDrawing"
-        @touchstart="startDrawing"
-        @touchmove="draw"
-        @touchend="stopDrawing"
       ></canvas>
 
       <!-- 캔버스 안내 텍스트 -->
@@ -276,6 +280,14 @@ export default {
     const isImageDragging = ref(false)
     const dragStart = ref({ x: 0, y: 0 })
     const dragTarget = ref(null) // 'canvas' or 'image'
+
+    // 터치 제스처 상태
+    const isTouching = ref(false)
+    const touchCount = ref(0)
+    const lastTouchDistance = ref(0)
+    const touchCenter = ref({ x: 0, y: 0 })
+    const initialZoom = ref(1)
+    const initialPan = ref({ x: 0, y: 0 })
 
     // 현재 도구 및 설정
     const currentTool = ref('pen')
@@ -457,10 +469,72 @@ export default {
       return { x, y }
     }
 
+    // 입력 방식 감지 함수 (pen.html 로직 참고)
+    const detectInputType = (event) => {
+      // 1. Pointer Events가 가장 정확하므로 우선 처리
+      if ('pointerType' in event && event.pointerType) {
+        return event.pointerType; // 'pen' | 'touch' | 'mouse'
+      }
+
+      // 2. Touch 폴백 (iOS)
+      if ('changedTouches' in event && event.changedTouches?.length) {
+        const touch = event.changedTouches[0]
+
+        // iOS WebKit: Apple Pencil이면 'stylus'가 올 수 있음
+        if ('touchType' in touch && touch.touchType === 'stylus') {
+          return 'pen'
+        }
+
+        // 압력이나 각도 정보가 있으면 펜
+        const hasForce = typeof touch.force === 'number' && touch.force > 0.1
+        const hasTilt = typeof touch.altitudeAngle === 'number' || typeof touch.azimuthAngle === 'number'
+        const hasPressure = typeof touch.pressure === 'number' && touch.pressure > 0.1
+
+        if (hasForce || hasTilt || hasPressure) {
+          return 'pen'
+        }
+
+        return 'finger'
+      }
+
+      // 3. 단일 터치 이벤트 처리 (touches 배열 사용)
+      if (event.type.includes('touch') && event.touches?.length) {
+        // 다중 터치는 항상 손가락
+        if (event.touches.length > 1) {
+          return 'finger'
+        }
+
+        const touch = event.touches[0]
+
+        // iOS WebKit 지원
+        if ('touchType' in touch && touch.touchType === 'stylus') {
+          return 'pen'
+        }
+
+        // 압력/각도 기반 감지
+        const hasForce = typeof touch.force === 'number' && touch.force > 0.1
+        const hasTilt = typeof touch.altitudeAngle === 'number' || typeof touch.azimuthAngle === 'number'
+
+        if (hasForce || hasTilt) {
+          return 'pen'
+        }
+
+        return 'finger'
+      }
+
+      // 4. Mouse 폴백
+      if (event.type === 'mousedown' || event.type === 'mousemove' || event.type === 'mouseup') {
+        return 'mouse'
+      }
+
+      return 'unknown'
+    }
+
     // 이벤트에서 기본 데이터 추출
     const extractEventData = (event) => {
       const coords = getCoordinates(event)
       const timestamp = Date.now() - sessionData.value.startTime
+      const inputType = detectInputType(event)
 
       // 포인터 이벤트에서 압력, 기울기, 비틀기 정보 추출
       let pressure = 0.5
@@ -494,6 +568,7 @@ export default {
         tiltY,
         twist,
         eventType: event.type,
+        inputType,
         tool: currentTool.value,
         color: currentColor.value,
         strokeWidth: strokeWidth.value
@@ -502,6 +577,202 @@ export default {
 
     // 현재 스트로크 데이터
     let currentStroke = null
+
+    // 터치 이벤트 유틸리티 함수들
+    const getTouchDistance = (touches) => {
+      if (touches.length < 2) return 0
+      const touch1 = touches[0]
+      const touch2 = touches[1]
+      const dx = touch1.clientX - touch2.clientX
+      const dy = touch1.clientY - touch2.clientY
+      return Math.sqrt(dx * dx + dy * dy)
+    }
+
+    const getTouchCenter = (touches) => {
+      if (touches.length === 0) return { x: 0, y: 0 }
+      let x = 0
+      let y = 0
+      for (let i = 0; i < touches.length; i++) {
+        x += touches[i].clientX
+        y += touches[i].clientY
+      }
+      const rect = canvas.value?.getBoundingClientRect()
+      if (rect) {
+        return {
+          x: x / touches.length - rect.left,
+          y: y / touches.length - rect.top
+        }
+      }
+      return { x: x / touches.length, y: y / touches.length }
+    }
+
+    // Pointer Events 핸들러들 (우선 처리)
+    const handlePointerDown = (event) => {
+      if (!canvas.value) return
+
+      event.preventDefault()
+      const inputType = detectInputType(event)
+
+      // 펜이나 마우스만 그리기 허용
+      if (inputType === 'pen' || inputType === 'mouse') {
+        startDrawing(event)
+      } else if (inputType === 'touch') {
+        // 손가락 터치는 드래그 모드
+        isDragging.value = true
+        const coords = getCoordinates(event)
+        dragStart.value = { x: coords.x, y: coords.y }
+        dragTarget.value = 'canvas'
+      }
+    }
+
+    const handlePointerMove = (event) => {
+      if (!canvas.value) return
+
+      const inputType = detectInputType(event)
+
+      if (inputType === 'pen' || inputType === 'mouse') {
+        draw(event)
+        updateEraserCursor(event)
+      } else if (inputType === 'touch' && isDragging.value) {
+        // 손가락 터치 드래그
+        event.preventDefault()
+        const coords = getCoordinates(event)
+        const deltaX = coords.x - dragStart.value.x
+        const deltaY = coords.y - dragStart.value.y
+
+        panX.value += deltaX
+        panY.value += deltaY
+        redrawCanvas()
+        dragStart.value = coords
+      }
+    }
+
+    const handlePointerUp = (event) => {
+      const inputType = detectInputType(event)
+
+      if (inputType === 'pen' || inputType === 'mouse') {
+        stopDrawing(event)
+      } else if (inputType === 'touch') {
+        isDragging.value = false
+        dragTarget.value = null
+      }
+    }
+
+    // 터치 이벤트 핸들러들 (폴백 - Pointer Events 미지원 시)
+    const handleTouchStart = (event) => {
+      // Pointer Events가 지원되는 경우 아무것도 하지 않음
+      if ('onpointerdown' in window) return
+
+      if (!canvas.value) return
+
+      const touches = event.touches
+      touchCount.value = touches.length
+
+      if (touches.length === 1) {
+        // 단일 터치 - 입력 타입 검사
+        const inputType = detectInputType(event)
+        if (inputType === 'pen') {
+          startDrawing(event)
+        } else {
+          // 손가락 터치는 드래그 모드
+          isDragging.value = true
+          const coords = getCoordinates(event)
+          dragStart.value = { x: coords.x, y: coords.y }
+          dragTarget.value = 'canvas'
+        }
+      } else if (touches.length === 2) {
+        // 두 손가락 터치 - 핀치 준비
+        event.preventDefault()
+        isTouching.value = true
+        lastTouchDistance.value = getTouchDistance(touches)
+        touchCenter.value = getTouchCenter(touches)
+        initialZoom.value = zoom.value
+        initialPan.value = { x: panX.value, y: panY.value }
+
+        // 기존 드래잉 중단
+        if (isDrawing.value) {
+          stopDrawing(event)
+        }
+      }
+    }
+
+    const handleTouchMove = (event) => {
+      // Pointer Events가 지원되는 경우 아무것도 하지 않음
+      if ('onpointerdown' in window) return
+
+      if (!canvas.value) return
+
+      const touches = event.touches
+
+      if (touches.length === 1 && !isTouching.value) {
+        // 단일 터치 - 입력 타입 검사
+        const inputType = detectInputType(event)
+        if (inputType === 'pen') {
+          draw(event)
+        } else if (isDragging.value) {
+          // 손가락 드래그
+          event.preventDefault()
+          const coords = getCoordinates(event)
+          const deltaX = coords.x - dragStart.value.x
+          const deltaY = coords.y - dragStart.value.y
+
+          panX.value += deltaX
+          panY.value += deltaY
+          redrawCanvas()
+          dragStart.value = coords
+        }
+      } else if (touches.length === 2 && isTouching.value) {
+        // 두 손가락 터치 - 핀치 제스처
+        event.preventDefault()
+
+        const currentDistance = getTouchDistance(touches)
+        const currentCenter = getTouchCenter(touches)
+
+        if (lastTouchDistance.value > 0) {
+          // 확대/축소 계산
+          const scale = currentDistance / lastTouchDistance.value
+          const newZoom = Math.max(0.2, Math.min(5, initialZoom.value * scale))
+
+          // 확대/축소 중심점 고려한 패닝 조정
+          const zoomRatio = newZoom / zoom.value
+          const centerOffsetX = currentCenter.x - touchCenter.value.x
+          const centerOffsetY = currentCenter.y - touchCenter.value.y
+
+          zoom.value = newZoom
+          panX.value = initialPan.value.x + centerOffsetX
+          panY.value = initialPan.value.y + centerOffsetY
+
+          redrawCanvas()
+        }
+      }
+    }
+
+    const handleTouchEnd = (event) => {
+      // Pointer Events가 지원되는 경우 아무것도 하지 않음
+      if ('onpointerdown' in window) return
+
+      const touches = event.touches
+      touchCount.value = touches.length
+
+      if (touches.length === 0) {
+        // 모든 터치 끝남
+        if (isTouching.value) {
+          isTouching.value = false
+        } else {
+          const inputType = detectInputType(event)
+          if (inputType === 'pen') {
+            stopDrawing(event)
+          } else {
+            isDragging.value = false
+            dragTarget.value = null
+          }
+        }
+      } else if (touches.length === 1 && isTouching.value) {
+        // 핀치에서 단일 터치로 전환
+        isTouching.value = false
+        lastTouchDistance.value = 0
+      }
+    }
 
 
     // 이미지 영역 체크 (화면 좌표에서 직접 체크)
@@ -551,6 +822,15 @@ export default {
       const eventData = extractEventData(event)
       sessionData.value.events.push(eventData)
 
+      // 손가락 터치인 경우 그리기 방지 (손도구 모드가 아니어도)
+      if (eventData.inputType === 'finger') {
+        // 손가락은 항상 드래그 모드
+        isDragging.value = true
+        dragStart.value = { x: coords.x, y: coords.y }
+        dragTarget.value = 'canvas'
+        return
+      }
+
       if (currentTool.value === 'hand') {
         // 손도구 모드
         isDragging.value = true
@@ -564,8 +844,8 @@ export default {
           // 캔버스 패닝
           dragTarget.value = 'canvas'
         }
-      } else {
-        // 그리기 모드
+      } else if (eventData.inputType === 'pen' || eventData.inputType === 'mouse') {
+        // 펜이나 마우스만 그리기 가능
         isDrawing.value = true
         hasDrawn.value = true
 
@@ -597,9 +877,10 @@ export default {
 
       event.preventDefault()
       const coords = getCoordinates(event)
+      const eventData = extractEventData(event)
 
-      if (currentTool.value === 'hand' && isDragging.value) {
-        // 손도구 드래그
+      // 드래그 모드 (손도구 또는 손가락)
+      if (isDragging.value) {
         const deltaX = coords.x - dragStart.value.x
         const deltaY = coords.y - dragStart.value.y
 
@@ -618,9 +899,8 @@ export default {
           redrawCanvas()
           dragStart.value = coords
         }
-      } else if (isDrawing.value && ctx) {
-        // 그리기 중 이벤트 데이터 수집
-        const eventData = extractEventData(event)
+      } else if (isDrawing.value && ctx && (eventData.inputType === 'pen' || eventData.inputType === 'mouse')) {
+        // 펜이나 마우스만 그리기 가능
         sessionData.value.events.push(eventData)
 
         // 현재 스트로크에 포인트 추가
@@ -959,7 +1239,13 @@ export default {
       downloadSessionData,
       generateSessionData,
       eraserCursorStyle,
-      updateEraserCursor
+      updateEraserCursor,
+      handlePointerDown,
+      handlePointerMove,
+      handlePointerUp,
+      handleTouchStart,
+      handleTouchMove,
+      handleTouchEnd
     }
   }
 }
