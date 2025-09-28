@@ -281,19 +281,28 @@ export default {
     const dragStart = ref({ x: 0, y: 0 })
     const dragTarget = ref(null) // 'canvas' or 'image'
 
-    // 터치 제스처 상태
+    // 터치 제스처 상태 (개선된 버전)
     const isTouching = ref(false)
     const touchCount = ref(0)
     const lastTouchDistance = ref(0)
     const touchCenter = ref({ x: 0, y: 0 })
     const initialZoom = ref(1)
     const initialPan = ref({ x: 0, y: 0 })
+    const gestureStartTime = ref(0)
+    const gestureThreshold = 10 // 최소 이동 거리 (px)
+    const zoomThreshold = 20 // 최소 핀치 거리 (px)
+    const touchStartPositions = ref([])
+    const lastGestureTime = ref(0)
+    const gestureDebounce = 16 // 60fps 제한
 
     // 현재 도구 및 설정
     const currentTool = ref('pen')
     const currentColor = ref('#000000')
     const customColor = ref('#000000')
     const strokeWidth = ref(3)
+
+    // 지우개 전용 설정 (고정 값)
+    const eraserSize = 20 // 고정 사이즈 20px
 
     // UUID 생성 함수 (브라우저 호환성)
     const generateUUID = () => {
@@ -347,13 +356,12 @@ export default {
     let lastX = 0
     let lastY = 0
 
-    // 지우개 커서 스타일
+    // 지우개 커서 스타일 (고정 크기)
     const eraserCursorStyle = computed(() => {
       if (currentTool.value !== 'eraser') return {}
 
-      const size = strokeWidth.value * 2 // 실제 지우개 크기에 맞게 조정
       return {
-        '--eraser-size': `${size}px`
+        '--eraser-size': `${eraserSize}px`
       }
     })
 
@@ -416,41 +424,64 @@ export default {
       saveToHistory()
     }
 
-    // 오버레이 이미지 그리기 (변환 없이 기본 좌표계에서)
+    // 오버레이 이미지 그리기 (안정화된 버전)
     const drawOverlayImage = () => {
-      if (!ctx || !overlayImage.value) return
+      if (!ctx || !overlayImage.value || !canvas.value) return
 
-      const containerRect = canvasContainer.value.getBoundingClientRect()
+      // 캔버스 논리적 크기 사용 (디바이스 회전 대응)
+      const logicalWidth = canvas.value.width / (window.devicePixelRatio || 1)
+      const logicalHeight = canvas.value.height / (window.devicePixelRatio || 1)
 
       // 이미지 크기가 설정되지 않은 경우 초기 크기 설정
-      if (overlayImageSize.value.width === 0) {
-        const maxWidth = containerRect.width * 0.3  // 캔버스 너비의 30%
-        const maxHeight = containerRect.height * 0.3 // 캔버스 높이의 30%
+      if (overlayImageSize.value.width === 0 || overlayImageSize.value.height === 0) {
+        const maxWidth = Math.min(logicalWidth * 0.3, 200)  // 최대 200px
+        const maxHeight = Math.min(logicalHeight * 0.3, 200) // 최대 200px
 
-        let drawWidth = overlayImage.value.width
-        let drawHeight = overlayImage.value.height
+        let drawWidth = overlayImage.value.naturalWidth || overlayImage.value.width
+        let drawHeight = overlayImage.value.naturalHeight || overlayImage.value.height
 
         // 크기 조정 (비율 유지)
         if (drawWidth > maxWidth || drawHeight > maxHeight) {
           const scale = Math.min(maxWidth / drawWidth, maxHeight / drawHeight)
-          drawWidth = drawWidth * scale
-          drawHeight = drawHeight * scale
+          drawWidth = Math.floor(drawWidth * scale)
+          drawHeight = Math.floor(drawHeight * scale)
         }
 
         overlayImageSize.value = { width: drawWidth, height: drawHeight }
       }
 
-      // 변환 적용 없이 기본 좌표계에서 그리기
-      ctx.drawImage(
-        overlayImage.value,
-        overlayImagePosition.value.x * zoom.value + panX.value,
-        overlayImagePosition.value.y * zoom.value + panY.value,
-        overlayImageSize.value.width * zoom.value,
-        overlayImageSize.value.height * zoom.value
-      )
+      // 안정된 좌표 계산
+      const drawX = (overlayImagePosition.value.x + panX.value / zoom.value)
+      const drawY = (overlayImagePosition.value.y + panY.value / zoom.value)
+      const drawWidth = overlayImageSize.value.width
+      const drawHeight = overlayImageSize.value.height
+
+      // 경계 체크 (캔버스를 벗어나지 않도록)
+      if (drawX + drawWidth > 0 && drawX < logicalWidth &&
+          drawY + drawHeight > 0 && drawY < logicalHeight) {
+
+        ctx.save()
+        // 안티앨리어싱 설정
+        ctx.imageSmoothingEnabled = true
+        ctx.imageSmoothingQuality = 'high'
+
+        try {
+          ctx.drawImage(
+            overlayImage.value,
+            Math.floor(drawX),
+            Math.floor(drawY),
+            Math.floor(drawWidth),
+            Math.floor(drawHeight)
+          )
+        } catch (error) {
+          console.warn('오버레이 이미지 그리기 실패:', error)
+        }
+
+        ctx.restore()
+      }
     }
 
-    // 좌표 계산 (마우스/터치 이벤트)
+    // 좌표 계산 (마우스/터치 이벤트) - 줌/패닝 역변환 적용
     const getCoordinates = (event) => {
       const canvasEl = canvas.value
       const rect = canvasEl.getBoundingClientRect()
@@ -462,6 +493,29 @@ export default {
         y = event.touches[0].clientY - rect.top
       } else {
         // 마우스 이벤트
+        x = event.clientX - rect.left
+        y = event.clientY - rect.top
+      }
+
+      // 줌/패닝 역변환: 화면 좌표 → 논리적 캔버스 좌표
+      // redrawCanvas에서 scale(zoom) -> translate(panX/zoom, panY/zoom) 적용하므로
+      // 역변환: (screen - pan) / zoom
+      const logicalX = (x - panX.value) / zoom.value
+      const logicalY = (y - panY.value) / zoom.value
+
+      return { x: logicalX, y: logicalY }
+    }
+
+    // 화면 좌표 계산 (드래그/제스처용)
+    const getScreenCoordinates = (event) => {
+      const canvasEl = canvas.value
+      const rect = canvasEl.getBoundingClientRect()
+
+      let x, y
+      if (event.touches && event.touches.length > 0) {
+        x = event.touches[0].clientX - rect.left
+        y = event.touches[0].clientY - rect.top
+      } else {
         x = event.clientX - rect.left
         y = event.clientY - rect.top
       }
@@ -617,11 +671,16 @@ export default {
       if (inputType === 'pen' || inputType === 'mouse') {
         startDrawing(event)
       } else if (inputType === 'touch') {
-        // 손가락 터치는 드래그 모드
+        // 손가락 터치는 드래그 모드 (더 안정적)
+        const now = performance.now()
+        if (now - lastGestureTime.value < gestureDebounce) return
+
         isDragging.value = true
         const coords = getCoordinates(event)
         dragStart.value = { x: coords.x, y: coords.y }
         dragTarget.value = 'canvas'
+        gestureStartTime.value = now
+        lastGestureTime.value = now
       }
     }
 
@@ -634,16 +693,24 @@ export default {
         draw(event)
         updateEraserCursor(event)
       } else if (inputType === 'touch' && isDragging.value) {
-        // 손가락 터치 드래그
+        // 손가락 터치 드래그 (민감도 개선)
+        const now = performance.now()
+        if (now - lastGestureTime.value < gestureDebounce) return
+
         event.preventDefault()
         const coords = getCoordinates(event)
         const deltaX = coords.x - dragStart.value.x
         const deltaY = coords.y - dragStart.value.y
 
+        // 최소 이동 거리 채크
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+        if (distance < gestureThreshold) return
+
         panX.value += deltaX
         panY.value += deltaY
         redrawCanvas()
         dragStart.value = coords
+        lastGestureTime.value = now
       }
     }
 
@@ -667,6 +734,14 @@ export default {
 
       const touches = event.touches
       touchCount.value = touches.length
+      const now = performance.now()
+
+      // 터치 시작 위치 저장
+      touchStartPositions.value = Array.from(touches).map(touch => ({
+        x: touch.clientX,
+        y: touch.clientY,
+        identifier: touch.identifier
+      }))
 
       if (touches.length === 1) {
         // 단일 터치 - 입력 타입 검사
@@ -674,24 +749,41 @@ export default {
         if (inputType === 'pen') {
           startDrawing(event)
         } else {
-          // 손가락 터치는 드래그 모드
-          isDragging.value = true
-          const coords = getCoordinates(event)
-          dragStart.value = { x: coords.x, y: coords.y }
-          dragTarget.value = 'canvas'
+          // 손가락 터치는 드래그 모드 (여전히 처리)
+          if (now - lastGestureTime.value >= gestureDebounce) {
+            isDragging.value = true
+            const coords = getCoordinates(event)
+            dragStart.value = { x: coords.x, y: coords.y }
+            dragTarget.value = 'canvas'
+            gestureStartTime.value = now
+            lastGestureTime.value = now
+          }
         }
       } else if (touches.length === 2) {
-        // 두 손가락 터치 - 핀치 준비
+        // 두 손가락 터치 - 핀치 준비 (개선된 버전)
         event.preventDefault()
-        isTouching.value = true
-        lastTouchDistance.value = getTouchDistance(touches)
-        touchCenter.value = getTouchCenter(touches)
-        initialZoom.value = zoom.value
-        initialPan.value = { x: panX.value, y: panY.value }
 
-        // 기존 드래잉 중단
-        if (isDrawing.value) {
-          stopDrawing(event)
+        const distance = getTouchDistance(touches)
+        const center = getTouchCenter(touches)
+
+        // 최소 거리 체크
+        if (distance > zoomThreshold) {
+          isTouching.value = true
+          lastTouchDistance.value = distance
+          touchCenter.value = center
+          initialZoom.value = zoom.value
+          initialPan.value = { x: panX.value, y: panY.value }
+          gestureStartTime.value = now
+          lastGestureTime.value = now
+
+          // 기존 드래잉 중단
+          if (isDrawing.value) {
+            stopDrawing(event)
+          }
+          if (isDragging.value) {
+            isDragging.value = false
+            dragTarget.value = null
+          }
         }
       }
     }
@@ -703,6 +795,10 @@ export default {
       if (!canvas.value) return
 
       const touches = event.touches
+      const now = performance.now()
+
+      // 프레임레이트 제한
+      if (now - lastGestureTime.value < gestureDebounce) return
 
       if (touches.length === 1 && !isTouching.value) {
         // 단일 터치 - 입력 타입 검사
@@ -710,39 +806,49 @@ export default {
         if (inputType === 'pen') {
           draw(event)
         } else if (isDragging.value) {
-          // 손가락 드래그
+          // 손가락 드래그 (민감도 개선)
           event.preventDefault()
           const coords = getCoordinates(event)
           const deltaX = coords.x - dragStart.value.x
           const deltaY = coords.y - dragStart.value.y
 
-          panX.value += deltaX
-          panY.value += deltaY
-          redrawCanvas()
-          dragStart.value = coords
+          // 최소 이동 거리 체크
+          const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
+          if (distance >= gestureThreshold) {
+            panX.value += deltaX
+            panY.value += deltaY
+            redrawCanvas()
+            dragStart.value = coords
+            lastGestureTime.value = now
+          }
         }
       } else if (touches.length === 2 && isTouching.value) {
-        // 두 손가락 터치 - 핀치 제스처
+        // 두 손가락 터치 - 핀치 제스처 (개선된 버전)
         event.preventDefault()
 
         const currentDistance = getTouchDistance(touches)
         const currentCenter = getTouchCenter(touches)
 
-        if (lastTouchDistance.value > 0) {
-          // 확대/축소 계산
+        if (lastTouchDistance.value > zoomThreshold && currentDistance > zoomThreshold) {
+          // 확대/축소 계산 (더 안정적)
           const scale = currentDistance / lastTouchDistance.value
-          const newZoom = Math.max(0.2, Math.min(5, initialZoom.value * scale))
+          const scaleChange = Math.abs(scale - 1)
 
-          // 확대/축소 중심점 고려한 패닝 조정
-          const zoomRatio = newZoom / zoom.value
-          const centerOffsetX = currentCenter.x - touchCenter.value.x
-          const centerOffsetY = currentCenter.y - touchCenter.value.y
+          // 너무 작은 스케일 변화 무시
+          if (scaleChange > 0.02) {
+            const newZoom = Math.max(0.2, Math.min(5, initialZoom.value * scale))
 
-          zoom.value = newZoom
-          panX.value = initialPan.value.x + centerOffsetX
-          panY.value = initialPan.value.y + centerOffsetY
+            // 확대/축소 중심점 고려한 패닝 조정
+            const centerOffsetX = currentCenter.x - touchCenter.value.x
+            const centerOffsetY = currentCenter.y - touchCenter.value.y
 
-          redrawCanvas()
+            zoom.value = newZoom
+            panX.value = initialPan.value.x + centerOffsetX
+            panY.value = initialPan.value.y + centerOffsetY
+
+            redrawCanvas()
+            lastGestureTime.value = now
+          }
         }
       }
     }
@@ -775,21 +881,27 @@ export default {
     }
 
 
-    // 이미지 영역 체크 (화면 좌표에서 직접 체크)
+    // 이미지 영역 체크 (안정화된 버전)
     const isPointInImage = (x, y) => {
-      if (!overlayImage.value) return false
+      if (!overlayImage.value || !overlayImageSize.value.width || !overlayImageSize.value.height) {
+        return false
+      }
 
-      // 화면에 표시된 이미지의 실제 위치와 크기
-      const imageScreenX = overlayImagePosition.value.x * zoom.value + panX.value
-      const imageScreenY = overlayImagePosition.value.y * zoom.value + panY.value
-      const imageScreenWidth = overlayImageSize.value.width * zoom.value
-      const imageScreenHeight = overlayImageSize.value.height * zoom.value
+      // 좌표 정규화 (디바이스 회전 대응)
+      const normalizedX = Math.floor(x)
+      const normalizedY = Math.floor(y)
+
+      // 이미지 위치 계산 (안정적)
+      const imageX = Math.floor(overlayImagePosition.value.x + panX.value / zoom.value)
+      const imageY = Math.floor(overlayImagePosition.value.y + panY.value / zoom.value)
+      const imageWidth = Math.floor(overlayImageSize.value.width)
+      const imageHeight = Math.floor(overlayImageSize.value.height)
 
       return (
-        x >= imageScreenX &&
-        x <= imageScreenX + imageScreenWidth &&
-        y >= imageScreenY &&
-        y <= imageScreenY + imageScreenHeight
+        normalizedX >= imageX &&
+        normalizedX <= imageX + imageWidth &&
+        normalizedY >= imageY &&
+        normalizedY <= imageY + imageHeight
       )
     }
 
@@ -832,18 +944,11 @@ export default {
       }
 
       if (currentTool.value === 'hand') {
-        // 손도구 모드
+        // 손도구 모드 - 항상 캔버스 전체를 이동
         isDragging.value = true
-        dragStart.value = { x: coords.x, y: coords.y }
-
-        if (isPointInImage(coords.x, coords.y)) {
-          // 이미지 드래그
-          dragTarget.value = 'image'
-          isImageDragging.value = true
-        } else {
-          // 캔버스 패닝
-          dragTarget.value = 'canvas'
-        }
+        const screenCoords = getScreenCoordinates(event)
+        dragStart.value = { x: screenCoords.x, y: screenCoords.y }
+        dragTarget.value = 'canvas' // 항상 캔버스 패닝만 수행
       } else if (eventData.inputType === 'pen' || eventData.inputType === 'mouse') {
         // 펜이나 마우스만 그리기 가능
         isDrawing.value = true
@@ -854,7 +959,7 @@ export default {
 
         ctx.globalCompositeOperation = currentTool.value === 'eraser' ? 'destination-out' : 'source-over'
         ctx.strokeStyle = currentTool.value === 'eraser' ? 'rgba(0,0,0,1)' : currentColor.value
-        ctx.lineWidth = strokeWidth.value
+        ctx.lineWidth = currentTool.value === 'eraser' ? eraserSize : strokeWidth.value
 
         ctx.beginPath()
         ctx.moveTo(lastX, lastY)
@@ -865,7 +970,7 @@ export default {
           startTime: eventData.timestamp,
           tool: currentTool.value,
           color: currentColor.value,
-          strokeWidth: strokeWidth.value,
+          strokeWidth: currentTool.value === 'eraser' ? eraserSize : strokeWidth.value,
           points: [eventData]
         }
       }
@@ -879,26 +984,16 @@ export default {
       const coords = getCoordinates(event)
       const eventData = extractEventData(event)
 
-      // 드래그 모드 (손도구 또는 손가락)
+      // 드래그 모드 (손도구 또는 손가락) - 캔버스 패닝만
       if (isDragging.value) {
         const deltaX = coords.x - dragStart.value.x
         const deltaY = coords.y - dragStart.value.y
 
-        if (dragTarget.value === 'image' && overlayImage.value) {
-          // 이미지 이동
-          overlayImagePosition.value = {
-            x: overlayImagePosition.value.x + deltaX / zoom.value,
-            y: overlayImagePosition.value.y + deltaY / zoom.value
-          }
-          redrawCanvas()
-          dragStart.value = coords
-        } else if (dragTarget.value === 'canvas') {
-          // 캔버스 패닝
-          panX.value += deltaX
-          panY.value += deltaY
-          redrawCanvas()
-          dragStart.value = coords
-        }
+        // 항상 캔버스 패닝만 수행
+        panX.value += deltaX
+        panY.value += deltaY
+        redrawCanvas()
+        dragStart.value = coords
       } else if (isDrawing.value && ctx && (eventData.inputType === 'pen' || eventData.inputType === 'mouse')) {
         // 펜이나 마우스만 그리기 가능
         sessionData.value.events.push(eventData)
@@ -1038,14 +1133,24 @@ export default {
     const redrawCanvas = () => {
       if (!ctx || !canvas.value) return
 
-      // 캔버스 클리어
+      // 캔버스 전체 클리어
+      ctx.save()
+      ctx.setTransform(1, 0, 0, 1, 0, 0) // 변환 초기화
       ctx.clearRect(0, 0, canvas.value.width, canvas.value.height)
+      ctx.restore()
 
       // 현재 히스토리 단계의 이미지 복원
       if (historyStep.value >= 0 && history.value[historyStep.value]) {
         const img = new Image()
         img.onload = () => {
+          // 줌 및 패닝 적용
+          ctx.save()
+          ctx.scale(zoom.value, zoom.value)
+          ctx.translate(panX.value / zoom.value, panY.value / zoom.value)
+
           ctx.drawImage(img, 0, 0)
+          ctx.restore()
+
           // 오버레이 이미지 다시 그리기
           if (overlayImage.value) {
             drawOverlayImage()
@@ -1114,28 +1219,58 @@ export default {
       redrawCanvas()
     }
 
-    // 오버레이 이미지 추가 (외부에서 호출)
+    // 오버레이 이미지 추가 (안정화된 버전)
     const addOverlayImage = (imageData) => {
-      if (!imageData || !imageData.src) return
+      if (!imageData || !imageData.src) {
+        console.warn('잘못된 이미지 데이터:', imageData)
+        return
+      }
+
+      // 기존 이미지 정리
+      if (overlayImage.value) {
+        overlayImage.value = null
+        overlayImageData.value = null
+      }
 
       const img = new Image()
+
       img.onload = () => {
-        overlayImage.value = img
-        overlayImageData.value = imageData
+        try {
+          overlayImage.value = img
+          overlayImageData.value = imageData
 
-        // 이미지 크기와 위치 초기화
-        overlayImagePosition.value = { x: 20, y: 20 }
-        overlayImageSize.value = { width: 0, height: 0 }
+          // 안전한 초기 위치 설정
+          const safeX = Math.max(10, Math.min(100, 20))
+          const safeY = Math.max(10, Math.min(100, 20))
 
-        // 오버레이 이미지만 그리기 (히스토리 저장 안 함)
-        if (ctx && canvas.value) {
-          drawOverlayImage()
-          hasDrawn.value = true
+          overlayImagePosition.value = { x: safeX, y: safeY }
+          overlayImageSize.value = { width: 0, height: 0 } // drawOverlayImage에서 자동 계산
+
+          // 이미지 그리기
+          if (ctx && canvas.value) {
+            drawOverlayImage()
+            hasDrawn.value = true
+          }
+
+          console.log('오버레이 이미지 로드 완료:', {
+            width: img.naturalWidth || img.width,
+            height: img.naturalHeight || img.height
+          })
+        } catch (error) {
+          console.error('이미지 처리 오류:', error)
+          overlayImage.value = null
+          overlayImageData.value = null
         }
       }
+
       img.onerror = (error) => {
         console.error('이미지 로드 실패:', error)
+        overlayImage.value = null
+        overlayImageData.value = null
       }
+
+      // CORS 예방 대용
+      img.crossOrigin = 'anonymous'
       img.src = imageData.src
     }
 
@@ -1146,63 +1281,129 @@ export default {
       canRedo.value = historyStep.value < history.value.length - 1
     }, { deep: true })
 
-    // 창 크기 변경 시 캔버스 재조정
+    // 디바이스 회전/리사이즈 대응 (안정화된 버전)
     const handleResize = () => {
       if (!canvas.value || !canvasContainer.value) return
 
-      // 오버레이 이미지 정보 저장
-      const savedOverlayImage = overlayImage.value
-      const savedOverlayImageData = overlayImageData.value
-      const savedOverlayPosition = { ...overlayImagePosition.value }
-      const savedOverlaySize = { ...overlayImageSize.value }
-
-      // 현재 히스토리 저장
-      const currentHistoryData = history.value[historyStep.value]
-
-      nextTick(() => {
-        // 캔버스 크기 재조정
-        initCanvas()
-
-        // 드로잉 히스토리 복원
-        if (currentHistoryData && hasDrawn.value) {
-          const img = new Image()
-          img.onload = () => {
-            ctx.drawImage(img, 0, 0)
-
-            // 오버레이 이미지 복원
-            if (savedOverlayImage) {
-              overlayImage.value = savedOverlayImage
-              overlayImageData.value = savedOverlayImageData
-              overlayImagePosition.value = savedOverlayPosition
-              overlayImageSize.value = savedOverlaySize
-
-              drawOverlayImage()
-            }
-          }
-          img.src = currentHistoryData
-        } else if (savedOverlayImage) {
-          // 드로잉이 없고 오버레이 이미지만 있는 경우
-          overlayImage.value = savedOverlayImage
-          overlayImageData.value = savedOverlayImageData
-          overlayImagePosition.value = savedOverlayPosition
-          overlayImageSize.value = savedOverlaySize
-
-          drawOverlayImage()
-        }
-      })
+      // 디바운스 처리
+      clearTimeout(handleResize.timeout)
+      handleResize.timeout = setTimeout(() => {
+        performResize()
+      }, 100)
     }
 
-    // 컴포넌트 마운트 시 초기화
+    const performResize = () => {
+      if (!canvas.value || !canvasContainer.value) return
+
+      try {
+        // 상태 저장 (더 안전하게)
+        const savedState = {
+          overlayImage: overlayImage.value,
+          overlayImageData: overlayImageData.value ? { ...overlayImageData.value } : null,
+          overlayPosition: overlayImagePosition.value ? { ...overlayImagePosition.value } : { x: 20, y: 20 },
+          overlaySize: overlayImageSize.value ? { ...overlayImageSize.value } : { width: 0, height: 0 },
+          currentZoom: zoom.value,
+          currentPanX: panX.value,
+          currentPanY: panY.value,
+          historyData: history.value[historyStep.value] || null,
+          wasDrawn: hasDrawn.value
+        }
+
+        // 리사이즈 수행
+        nextTick(() => {
+          try {
+            // 캔버스 재초기화
+            initCanvas()
+
+            // 상태 복원
+            if (savedState.historyData && savedState.wasDrawn) {
+              const img = new Image()
+              img.onload = () => {
+                try {
+                  if (ctx && canvas.value) {
+                    ctx.drawImage(img, 0, 0)
+                  }
+                  restoreOverlayImage(savedState)
+                } catch (error) {
+                  console.warn('히스토리 복원 실패:', error)
+                  restoreOverlayImage(savedState)
+                }
+              }
+              img.onerror = () => {
+                console.warn('히스토리 이미지 로드 실패')
+                restoreOverlayImage(savedState)
+              }
+              img.src = savedState.historyData
+            } else {
+              restoreOverlayImage(savedState)
+            }
+
+            // 줄 및 확대/축소 상태 복원
+            zoom.value = savedState.currentZoom
+            panX.value = savedState.currentPanX
+            panY.value = savedState.currentPanY
+
+          } catch (error) {
+            console.error('리사이즈 수행 오류:', error)
+          }
+        })
+      } catch (error) {
+        console.error('리사이즈 준비 오류:', error)
+      }
+    }
+
+    const restoreOverlayImage = (savedState) => {
+      if (savedState.overlayImage && savedState.overlayImageData) {
+        try {
+          overlayImage.value = savedState.overlayImage
+          overlayImageData.value = savedState.overlayImageData
+          overlayImagePosition.value = savedState.overlayPosition
+          overlayImageSize.value = savedState.overlaySize
+
+          if (ctx && canvas.value) {
+            drawOverlayImage()
+          }
+        } catch (error) {
+          console.warn('오버레이 이미진 복원 실패:', error)
+        }
+      }
+    }
+
+    // 컴포넌트 마운트 시 초기화 (강화된 버전)
     onMounted(() => {
       nextTick(() => {
         initCanvas()
-        window.addEventListener('resize', handleResize)
+
+        // 리사이즈 이벤트 등록
+        window.addEventListener('resize', handleResize, { passive: true })
+
+        // 디바이스 회전 이벤트 등록
+        window.addEventListener('orientationchange', () => {
+          // 회전 완료 후 지연 처리
+          setTimeout(handleResize, 200)
+        }, { passive: true })
+
+        // 비쥬얼 뷰포트 지원 (모바일 브라우저)
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener('resize', handleResize, { passive: true })
+        }
       })
     })
 
     // 컴포넌트 언마운트 시 정리
     onUnmounted(() => {
+      // 모든 이벤트 리스너 제거
       window.removeEventListener('resize', handleResize)
+      window.removeEventListener('orientationchange', handleResize)
+
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', handleResize)
+      }
+
+      // 타이머 정리
+      if (handleResize.timeout) {
+        clearTimeout(handleResize.timeout)
+      }
     })
 
     return {
