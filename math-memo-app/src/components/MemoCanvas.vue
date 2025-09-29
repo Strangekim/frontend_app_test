@@ -450,9 +450,9 @@ export default {
         overlayImageSize.value = { width: drawWidth, height: drawHeight }
       }
 
-      // 안정된 좌표 계산
-      const drawX = (overlayImagePosition.value.x + panX.value / zoom.value)
-      const drawY = (overlayImagePosition.value.y + panY.value / zoom.value)
+      // 안정된 좌표 계산 - 변환 매트릭스와 일치하도록 수정
+      const drawX = overlayImagePosition.value.x
+      const drawY = overlayImagePosition.value.y
       const drawWidth = overlayImageSize.value.width
       const drawHeight = overlayImageSize.value.height
 
@@ -461,6 +461,10 @@ export default {
           drawY + drawHeight > 0 && drawY < logicalHeight) {
 
         ctx.save()
+        // 변환 매트릭스 적용 (redrawCanvas와 동일)
+        ctx.translate(panX.value, panY.value)
+        ctx.scale(zoom.value, zoom.value)
+
         // 안티앨리어싱 설정
         ctx.imageSmoothingEnabled = true
         ctx.imageSmoothingQuality = 'high'
@@ -498,10 +502,9 @@ export default {
       }
 
       // 줌/패닝 역변환: 화면 좌표 → 논리적 캔버스 좌표
-      // redrawCanvas에서 scale(zoom) -> translate(panX/zoom, panY/zoom) 적용하므로
-      // 역변환: (screen - pan) / zoom
-      const logicalX = (x - panX.value) / zoom.value
-      const logicalY = (y - panY.value) / zoom.value
+      // 올바른 역변환 공식: (screen / zoom) - (pan / zoom)
+      const logicalX = x / zoom.value - panX.value / zoom.value
+      const logicalY = y / zoom.value - panY.value / zoom.value
 
       return { x: logicalX, y: logicalY }
     }
@@ -676,8 +679,8 @@ export default {
         if (now - lastGestureTime.value < gestureDebounce) return
 
         isDragging.value = true
-        const coords = getCoordinates(event)
-        dragStart.value = { x: coords.x, y: coords.y }
+        const screenCoords = getScreenCoordinates(event)
+        dragStart.value = { x: screenCoords.x, y: screenCoords.y }
         dragTarget.value = 'canvas'
         gestureStartTime.value = now
         lastGestureTime.value = now
@@ -698,18 +701,18 @@ export default {
         if (now - lastGestureTime.value < gestureDebounce) return
 
         event.preventDefault()
-        const coords = getCoordinates(event)
-        const deltaX = coords.x - dragStart.value.x
-        const deltaY = coords.y - dragStart.value.y
+        const screenCoords = getScreenCoordinates(event)
+        const deltaX = screenCoords.x - dragStart.value.x
+        const deltaY = screenCoords.y - dragStart.value.y
 
-        // 최소 이동 거리 채크
+        // 최소 이동 거리 체크
         const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
         if (distance < gestureThreshold) return
 
         panX.value += deltaX
         panY.value += deltaY
         redrawCanvas()
-        dragStart.value = coords
+        dragStart.value = screenCoords
         lastGestureTime.value = now
       }
     }
@@ -752,8 +755,8 @@ export default {
           // 손가락 터치는 드래그 모드 (여전히 처리)
           if (now - lastGestureTime.value >= gestureDebounce) {
             isDragging.value = true
-            const coords = getCoordinates(event)
-            dragStart.value = { x: coords.x, y: coords.y }
+            const screenCoords = getScreenCoordinates(event)
+            dragStart.value = { x: screenCoords.x, y: screenCoords.y }
             dragTarget.value = 'canvas'
             gestureStartTime.value = now
             lastGestureTime.value = now
@@ -808,9 +811,9 @@ export default {
         } else if (isDragging.value) {
           // 손가락 드래그 (민감도 개선)
           event.preventDefault()
-          const coords = getCoordinates(event)
-          const deltaX = coords.x - dragStart.value.x
-          const deltaY = coords.y - dragStart.value.y
+          const screenCoords = getScreenCoordinates(event)
+          const deltaX = screenCoords.x - dragStart.value.x
+          const deltaY = screenCoords.y - dragStart.value.y
 
           // 최소 이동 거리 체크
           const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY)
@@ -818,7 +821,7 @@ export default {
             panX.value += deltaX
             panY.value += deltaY
             redrawCanvas()
-            dragStart.value = coords
+            dragStart.value = screenCoords
             lastGestureTime.value = now
           }
         }
@@ -938,7 +941,8 @@ export default {
       if (eventData.inputType === 'finger') {
         // 손가락은 항상 드래그 모드
         isDragging.value = true
-        dragStart.value = { x: coords.x, y: coords.y }
+        const screenCoords = getScreenCoordinates(event)
+        dragStart.value = { x: screenCoords.x, y: screenCoords.y }
         dragTarget.value = 'canvas'
         return
       }
@@ -961,8 +965,15 @@ export default {
         ctx.strokeStyle = currentTool.value === 'eraser' ? 'rgba(0,0,0,1)' : currentColor.value
         ctx.lineWidth = currentTool.value === 'eraser' ? eraserSize : strokeWidth.value
 
+        // 변환 매트릭스 적용하여 그리기 시작
+        ctx.save()
+        ctx.translate(panX.value, panY.value)
+        ctx.scale(zoom.value, zoom.value)
+
         ctx.beginPath()
         ctx.moveTo(lastX, lastY)
+
+        ctx.restore()
 
         // 새 스트로크 시작
         currentStroke = {
@@ -986,14 +997,15 @@ export default {
 
       // 드래그 모드 (손도구 또는 손가락) - 캔버스 패닝만
       if (isDragging.value) {
-        const deltaX = coords.x - dragStart.value.x
-        const deltaY = coords.y - dragStart.value.y
+        const screenCoords = getScreenCoordinates(event)
+        const deltaX = screenCoords.x - dragStart.value.x
+        const deltaY = screenCoords.y - dragStart.value.y
 
         // 항상 캔버스 패닝만 수행
         panX.value += deltaX
         panY.value += deltaY
         redrawCanvas()
-        dragStart.value = coords
+        dragStart.value = screenCoords
       } else if (isDrawing.value && ctx && (eventData.inputType === 'pen' || eventData.inputType === 'mouse')) {
         // 펜이나 마우스만 그리기 가능
         sessionData.value.events.push(eventData)
@@ -1003,9 +1015,16 @@ export default {
           currentStroke.points.push(eventData)
         }
 
-        // 그리기
+        // 그리기 - 변환 매트릭스 적용
+        ctx.save()
+        ctx.translate(panX.value, panY.value)
+        ctx.scale(zoom.value, zoom.value)
+
         ctx.lineTo(coords.x, coords.y)
         ctx.stroke()
+
+        ctx.restore()
+
         lastX = coords.x
         lastY = coords.y
       }
@@ -1143,10 +1162,10 @@ export default {
       if (historyStep.value >= 0 && history.value[historyStep.value]) {
         const img = new Image()
         img.onload = () => {
-          // 줌 및 패닝 적용
+          // 줌 및 패닝 적용 - 올바른 변환 순서
           ctx.save()
+          ctx.translate(panX.value, panY.value)
           ctx.scale(zoom.value, zoom.value)
-          ctx.translate(panX.value / zoom.value, panY.value / zoom.value)
 
           ctx.drawImage(img, 0, 0)
           ctx.restore()
