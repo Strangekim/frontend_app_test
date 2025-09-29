@@ -45,11 +45,11 @@
           <label class="control-label">굵기</label>
           <input
             type="range"
-            v-model="strokeWidth"
+            v-model.number="strokeWidth"
             min="1"
             max="20"
             class="stroke-slider"
-            @input="updateStrokeWidth"
+            @input="updateStrokeWidth(parseInt($event.target.value, 10))"
           />
           <span class="stroke-value">{{ strokeWidth }}</span>
         </div>
@@ -330,7 +330,13 @@ export default {
       },
       stats: {
         undoCount: 0,
-        redoCount: 0
+        redoCount: 0,
+        eraserCount: 0,
+        zoomCount: 0,
+        panCount: 0,
+        toolChanges: 0,
+        colorChanges: 0,
+        strokeWidthChanges: 0
       }
     })
 
@@ -594,14 +600,18 @@ export default {
       const inputType = detectInputType(event)
 
       // 포인터 이벤트에서 압력, 기울기, 비틀기 정보 추출
-      let pressure = 0.5
+      let pressure = null // 기본값을 null로 설정
       let tiltX = 0
       let tiltY = 0
       let twist = 0
 
-      if (event.pressure !== undefined) {
+      // 실제 압력 센서가 있는 경우만 값 설정
+      if (event.pressure !== undefined && inputType === 'pen') {
         pressure = event.pressure
         sessionData.value.capabilities.pressure = true
+      } else if (inputType === 'mouse' || inputType === 'touch') {
+        // 마우스나 터치는 pressure를 null로 유지
+        pressure = null
       }
       if (event.tiltX !== undefined) {
         tiltX = event.tiltX
@@ -634,6 +644,17 @@ export default {
 
     // 현재 스트로크 데이터
     let currentStroke = null
+
+    // 이벤트 로깅 헬퍼 함수
+    const logEvent = (eventType, data = {}) => {
+      const timestamp = Date.now() - sessionData.value.startTime
+      const event = {
+        timestamp,
+        type: eventType,
+        ...data
+      }
+      sessionData.value.events.push(event)
+    }
 
     // 터치 이벤트 유틸리티 함수들
     const getTouchDistance = (touches) => {
@@ -684,6 +705,16 @@ export default {
         dragTarget.value = 'canvas'
         gestureStartTime.value = now
         lastGestureTime.value = now
+
+        // 패닝 시작 이벤트 로깅
+        sessionData.value.stats.panCount++
+        logEvent('canvas_pan_start', {
+          startX: screenCoords.x,
+          startY: screenCoords.y,
+          currentZoom: zoom.value,
+          prevPanX: panX.value,
+          prevPanY: panY.value
+        })
       }
     }
 
@@ -723,6 +754,15 @@ export default {
       if (inputType === 'pen' || inputType === 'mouse') {
         stopDrawing(event)
       } else if (inputType === 'touch') {
+        // 패닝 종료 이벤트 로깅
+        if (isDragging.value) {
+          logEvent('canvas_pan_end', {
+            finalPanX: panX.value,
+            finalPanY: panY.value,
+            currentZoom: zoom.value
+          })
+        }
+
         isDragging.value = false
         dragTarget.value = null
       }
@@ -760,6 +800,17 @@ export default {
             dragTarget.value = 'canvas'
             gestureStartTime.value = now
             lastGestureTime.value = now
+
+            // 패닝 시작 이벤트 로깅 (터치)
+            sessionData.value.stats.panCount++
+            logEvent('canvas_pan_start', {
+              startX: screenCoords.x,
+              startY: screenCoords.y,
+              currentZoom: zoom.value,
+              prevPanX: panX.value,
+              prevPanY: panY.value,
+              inputType: 'touch'
+            })
           }
         }
       } else if (touches.length === 2) {
@@ -839,6 +890,7 @@ export default {
 
           // 너무 작은 스케일 변화 무시
           if (scaleChange > 0.02) {
+            const previousZoom = zoom.value
             const newZoom = Math.max(0.2, Math.min(5, initialZoom.value * scale))
 
             // 확대/축소 중심점 고려한 패닝 조정
@@ -848,6 +900,24 @@ export default {
             zoom.value = newZoom
             panX.value = initialPan.value.x + centerOffsetX
             panY.value = initialPan.value.y + centerOffsetY
+
+            // 핀치 줌 이벤트 로깅
+            if (previousZoom !== newZoom) {
+              sessionData.value.stats.zoomCount++
+              logEvent('pinch_zoom', {
+                previousZoom,
+                newZoom,
+                scale,
+                centerX: currentCenter.x,
+                centerY: currentCenter.y,
+                previousPanX: initialPan.value.x,
+                previousPanY: initialPan.value.y,
+                newPanX: panX.value,
+                newPanY: panY.value,
+                viewportWidth: window.innerWidth,
+                viewportHeight: window.innerHeight
+              })
+            }
 
             redrawCanvas()
             lastGestureTime.value = now
@@ -872,6 +942,16 @@ export default {
           if (inputType === 'pen') {
             stopDrawing(event)
           } else {
+            // 패닝 종료 이벤트 로깅 (터치)
+            if (isDragging.value) {
+              logEvent('canvas_pan_end', {
+                finalPanX: panX.value,
+                finalPanY: panY.value,
+                currentZoom: zoom.value,
+                inputType: 'touch'
+              })
+            }
+
             isDragging.value = false
             dragTarget.value = null
           }
@@ -933,9 +1013,8 @@ export default {
       event.preventDefault()
       const coords = getCoordinates(event)
 
-      // 이벤트 데이터 수집
+      // 이벤트 데이터 수집 (스트로크에만 사용)
       const eventData = extractEventData(event)
-      sessionData.value.events.push(eventData)
 
       // 손가락 터치인 경우 그리기 방지 (손도구 모드가 아니어도)
       if (eventData.inputType === 'finger') {
@@ -944,6 +1023,17 @@ export default {
         const screenCoords = getScreenCoordinates(event)
         dragStart.value = { x: screenCoords.x, y: screenCoords.y }
         dragTarget.value = 'canvas'
+
+        // 패닝 시작 이벤트 로깅
+        sessionData.value.stats.panCount++
+        logEvent('canvas_pan_start', {
+          startX: screenCoords.x,
+          startY: screenCoords.y,
+          currentZoom: zoom.value,
+          prevPanX: panX.value,
+          prevPanY: panY.value
+        })
+
         return
       }
 
@@ -953,6 +1043,17 @@ export default {
         const screenCoords = getScreenCoordinates(event)
         dragStart.value = { x: screenCoords.x, y: screenCoords.y }
         dragTarget.value = 'canvas' // 항상 캔버스 패닝만 수행
+
+        // 패닝 시작 이벤트 로깅 (손도구)
+        sessionData.value.stats.panCount++
+        logEvent('canvas_pan_start', {
+          startX: screenCoords.x,
+          startY: screenCoords.y,
+          currentZoom: zoom.value,
+          prevPanX: panX.value,
+          prevPanY: panY.value,
+          tool: 'hand'
+        })
       } else if (eventData.inputType === 'pen' || eventData.inputType === 'mouse') {
         // 펜이나 마우스만 그리기 가능
         isDrawing.value = true
@@ -976,14 +1077,26 @@ export default {
         ctx.restore()
 
         // 새 스트로크 시작
+        const strokeId = generateUUID()
         currentStroke = {
-          id: generateUUID(),
+          id: strokeId,
           startTime: eventData.timestamp,
           tool: currentTool.value,
           color: currentColor.value,
           strokeWidth: currentTool.value === 'eraser' ? eraserSize : strokeWidth.value,
           points: [eventData]
         }
+
+        // 스트로크 시작 이벤트 로깅
+        logEvent('stroke_start', {
+          strokeId,
+          tool: currentTool.value,
+          color: currentColor.value,
+          strokeWidth: currentTool.value === 'eraser' ? eraserSize : strokeWidth.value,
+          inputType: eventData.inputType,
+          startX: coords.x,
+          startY: coords.y
+        })
       }
     }
 
@@ -1008,7 +1121,6 @@ export default {
         dragStart.value = screenCoords
       } else if (isDrawing.value && ctx && (eventData.inputType === 'pen' || eventData.inputType === 'mouse')) {
         // 펜이나 마우스만 그리기 가능
-        sessionData.value.events.push(eventData)
 
         // 현재 스트로크에 포인트 추가
         if (currentStroke) {
@@ -1033,20 +1145,43 @@ export default {
     // 그리기 종료
     const stopDrawing = (event) => {
       if (isDrawing.value) {
-        // 마지막 이벤트 데이터 수집
+        // 마지막 이벤트 데이터 수집 (스트로크에만 사용)
         const eventData = extractEventData(event)
-        sessionData.value.events.push(eventData)
 
         // 현재 스트로크 완료
         if (currentStroke) {
           currentStroke.endTime = eventData.timestamp
           currentStroke.points.push(eventData)
+
+          // 스트로크 종료 이벤트 로깅
+          const strokeDuration = currentStroke.endTime - currentStroke.startTime
+          const pointCount = currentStroke.points.length
+
+          logEvent('stroke_end', {
+            strokeId: currentStroke.id,
+            tool: currentStroke.tool,
+            duration: strokeDuration,
+            pointCount,
+            endX: eventData.x,
+            endY: eventData.y
+          })
+
           sessionData.value.strokes.push(currentStroke)
           currentStroke = null
         }
 
         isDrawing.value = false
         saveToHistory()
+      }
+
+      // 패닝 종료 이벤트 로깅
+      if (isDragging.value) {
+        sessionData.value.stats.panCount++
+        logEvent('canvas_pan_end', {
+          finalPanX: panX.value,
+          finalPanY: panY.value,
+          currentZoom: zoom.value
+        })
       }
 
       isDragging.value = false
@@ -1116,18 +1251,57 @@ export default {
 
     // 도구 설정
     const setTool = (tool) => {
+      const previousTool = currentTool.value
       currentTool.value = tool
+
+      // 도구 변경 이벤트 로깅
+      if (previousTool !== tool) {
+        sessionData.value.stats.toolChanges++
+
+        // 지우개로 전환할 때 지우개 카운트 증가
+        if (tool === 'eraser') {
+          sessionData.value.stats.eraserCount++
+        }
+
+        logEvent('tool_change', {
+          previousTool,
+          newTool: tool
+        })
+      }
     }
 
     const setColor = (color) => {
+      const previousColor = currentColor.value
       currentColor.value = color
       if (color !== customColor.value) {
         customColor.value = color
       }
+
+      // 색상 변경 이벤트 로깅
+      if (previousColor !== color) {
+        sessionData.value.stats.colorChanges++
+
+        logEvent('color_change', {
+          previousColor,
+          newColor: color
+        })
+      }
     }
 
-    const updateStrokeWidth = () => {
-      // 스트로크 폭 변경
+    const updateStrokeWidth = (newWidth) => {
+      // 현재 값과 새 값 모두 숫자로 변환
+      const previousWidth = typeof strokeWidth.value === 'string' ? parseInt(strokeWidth.value, 10) : strokeWidth.value
+      const numericWidth = typeof newWidth === 'string' ? parseInt(newWidth, 10) : newWidth
+
+      if (numericWidth !== undefined && numericWidth !== previousWidth) {
+        strokeWidth.value = numericWidth
+        sessionData.value.stats.strokeWidthChanges++
+
+        logEvent('stroke_width_change', {
+          previousWidth: previousWidth, // 숫자로 변환된 값
+          newWidth: numericWidth        // 숫자로 변환된 값
+        })
+      }
     }
 
     // 히스토리 저장
@@ -1193,6 +1367,12 @@ export default {
         historyStep.value--
         redrawCanvas()
         sessionData.value.stats.undoCount++
+
+        // Undo 이벤트 로깅
+        logEvent('undo', {
+          historyStep: historyStep.value,
+          totalHistoryLength: history.value.length
+        })
       }
     }
 
@@ -1201,6 +1381,12 @@ export default {
         historyStep.value++
         redrawCanvas()
         sessionData.value.stats.redoCount++
+
+        // Redo 이벤트 로깅
+        logEvent('redo', {
+          historyStep: historyStep.value,
+          totalHistoryLength: history.value.length
+        })
       }
     }
 
@@ -1218,23 +1404,77 @@ export default {
 
       hasDrawn.value = false
       saveToHistory()
+
+      // 전체 지우기 이벤트 로깅
+      logEvent('clear_all', {
+        strokesCleared: sessionData.value.strokes.length
+      })
     }
 
     // 확대/축소 기능
     const zoomIn = () => {
+      const previousZoom = zoom.value
       zoom.value = Math.min(zoom.value * 1.2, 5)
+
+      if (zoom.value !== previousZoom) {
+        sessionData.value.stats.zoomCount++
+        logEvent('zoom_in', {
+          previousZoom,
+          newZoom: zoom.value,
+          centerX: window.innerWidth / 2,
+          centerY: window.innerHeight / 2,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight
+        })
+      }
+
       redrawCanvas()
     }
 
     const zoomOut = () => {
+      const previousZoom = zoom.value
       zoom.value = Math.max(zoom.value / 1.2, 0.2)
+
+      if (zoom.value !== previousZoom) {
+        sessionData.value.stats.zoomCount++
+        logEvent('zoom_out', {
+          previousZoom,
+          newZoom: zoom.value,
+          centerX: window.innerWidth / 2,
+          centerY: window.innerHeight / 2,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight
+        })
+      }
+
       redrawCanvas()
     }
 
     const resetZoom = () => {
+      const previousZoom = zoom.value
+      const previousPanX = panX.value
+      const previousPanY = panY.value
+
       zoom.value = 1
       panX.value = 0
       panY.value = 0
+
+      if (previousZoom !== 1 || previousPanX !== 0 || previousPanY !== 0) {
+        sessionData.value.stats.zoomCount++
+        logEvent('zoom_reset', {
+          previousZoom,
+          newZoom: 1,
+          previousPanX,
+          previousPanY,
+          newPanX: 0,
+          newPanY: 0,
+          centerX: window.innerWidth / 2,
+          centerY: window.innerHeight / 2,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight
+        })
+      }
+
       redrawCanvas()
     }
 
@@ -1392,6 +1632,17 @@ export default {
     onMounted(() => {
       nextTick(() => {
         initCanvas()
+
+        // 세션 시작 이벤트 로깅
+        logEvent('session_start', {
+          userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          screenWidth: window.screen.width,
+          screenHeight: window.screen.height,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          devicePixelRatio: window.devicePixelRatio || 1
+        })
 
         // 리사이즈 이벤트 등록
         window.addEventListener('resize', handleResize, { passive: true })

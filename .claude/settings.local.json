@@ -9,7 +9,9 @@
       "Read(//c/Users/USER1/Desktop/**)",
       "Bash(npm run lint)",
       "Bash(mv:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(kill:*)",
+      "Bash(pkill:*)"
     ],
     "deny": [],
     "ask": []
